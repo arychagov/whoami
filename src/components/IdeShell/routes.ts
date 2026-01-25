@@ -14,6 +14,8 @@ export function fileIdToPath(id: FileId): string {
       return "/tools/json-formatter";
     case "urlcodec.tool":
       return "/tools/url-encode-decode";
+    case "w40k.tool":
+      return "/tools/w40k-calculator";
     default: {
       // Exhaustiveness
       const _never: never = id;
@@ -39,6 +41,7 @@ export function pathToFileId(pathname: string): FileId | null {
     if (tool === "roll") return "dice.tool";
     if (tool === "json-formatter") return "json.tool";
     if (tool === "url-encode-decode") return "urlcodec.tool";
+    if (tool === "w40k-calculator") return "w40k.tool";
     return null;
   }
 

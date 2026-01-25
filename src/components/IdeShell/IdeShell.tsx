@@ -6,6 +6,7 @@ import { fileSection, mainTree, pages, toolsTree, type FileId, type TreeNode } f
 import { UrlCodecTool } from "@/components/tools/UrlCodecTool";
 import { DiceTool } from "@/components/tools/DiceTool";
 import { JsonFormatterTool } from "@/components/tools/JsonFormatterTool";
+import { W40kCalculatorTool } from "@/components/tools/W40kCalculatorTool";
 import { AboutPage } from "@/components/main/AboutPage";
 import { ProjectsPage } from "@/components/main/ProjectsPage";
 import { SpeechesPage } from "@/components/main/SpeechesPage";
@@ -80,7 +81,8 @@ export function IdeShell({ initialPath }: { initialPath?: string }) {
   const [toolsTabs, setToolsTabs] = useState<Tab[]>([
     { id: "dice.tool" },
     { id: "json.tool" },
-    { id: "urlcodec.tool" }
+    { id: "urlcodec.tool" },
+    { id: "w40k.tool" }
   ]);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -271,6 +273,8 @@ export function IdeShell({ initialPath }: { initialPath?: string }) {
                 <DiceTool />
               ) : activeTab === "json.tool" ? (
                 <JsonFormatterTool />
+              ) : activeTab === "w40k.tool" ? (
+                <W40kCalculatorTool />
               ) : null
             ) : (
               page.lines.map((l, idx) => (

@@ -7,7 +7,8 @@ export type FileId =
   | "speeches.md"
   | "json.tool"
   | "urlcodec.tool"
-  | "dice.tool";
+  | "dice.tool"
+  | "w40k.tool";
 
 export type SectionId = "main" | "tools";
 
@@ -20,7 +21,8 @@ export const mainTree: TreeNode[] = [
 export const toolsTree: TreeNode[] = [
   { kind: "file", name: "JSON Formatter", id: "json.tool" },
   { kind: "file", name: "Roll", id: "dice.tool" },
-  { kind: "file", name: "URL encode/decode", id: "urlcodec.tool" }
+  { kind: "file", name: "URL encode/decode", id: "urlcodec.tool" },
+  { kind: "file", name: "W40K Calculator", id: "w40k.tool" }
 ];
 
 export const fileSection: Record<FileId, SectionId> = {
@@ -29,7 +31,8 @@ export const fileSection: Record<FileId, SectionId> = {
   "speeches.md": "main",
   "json.tool": "tools",
   "urlcodec.tool": "tools",
-  "dice.tool": "tools"
+  "dice.tool": "tools",
+  "w40k.tool": "tools"
 };
 
 export type IdePage = {
@@ -108,6 +111,18 @@ export const pages: Record<FileId, IdePage> = {
       { kind: "cm", text: " * Dice Roller" },
       { kind: "cm", text: " *" },
       { kind: "cm", text: " * Supports: Coin(d2), d4, d6, d8, d10, d12, d20, d100" },
+      { kind: "cm", text: " */" }
+    ]
+  },
+  "w40k.tool": {
+    id: "w40k.tool",
+    title: "W40K Calculator",
+    language: "tool",
+    lines: [
+      { kind: "cm", text: "/**" },
+      { kind: "cm", text: " * W40K Calculator" },
+      { kind: "cm", text: " *" },
+      { kind: "cm", text: " * Damage simulation." },
       { kind: "cm", text: " */" }
     ]
   }
