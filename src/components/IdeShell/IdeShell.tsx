@@ -205,7 +205,7 @@ export function IdeShell({ initialPath }: { initialPath?: string }) {
               }}
               title="Tools"
             >
-              <img className="uiIcon" src="/icons/tools.svg" alt="" />
+              <img className="uiIcon" src="/icons/tool-terminal.svg" alt="" />
             </button>
           </div>
         </aside>
