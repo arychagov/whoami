@@ -1,0 +1,2 @@
+* * * * * /usr/sbin/logrotate -s /var/lib/logrotate/status /etc/logrotate.d/whoami-nginx >/proc/1/fd/1 2>/proc/1/fd/2
+

@@ -22,4 +22,53 @@ services:
       - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
       # Certs on the server:
       - /root/certs:/etc/nginx/certs:ro
+      # Access logs (requested path inside container)
+      - whoami_logs:/root/logs
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=whoami
+      - POSTGRES_USER=whoami
+      - POSTGRES_PASSWORD=whoami
+    volumes:
+      - whoami_pg:/var/lib/postgresql/data
+      - ./deploy/postgres/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whoami -d whoami"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  log-consumer:
+    build:
+      context: ./services/log-consumer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgres://whoami:whoami@postgres:5432/whoami
+      - ACCESS_LOG_PATH=/logs/whoami.access.log
+      - FLUSH_INTERVAL_MS=2000
+      - MAX_BATCH_SIZE=1000
+      # Bound DB growth: we only keep visitor_hashes for N days (unique within this TTL window)
+      - UNIQUE_TTL_DAYS=7
+      - CLEANUP_INTERVAL_MS=3600000
+    volumes:
+      - whoami_logs:/logs:ro
+
+  logrotate:
+    build:
+      context: ./deploy/logrotate
+    restart: unless-stopped
+    depends_on:
+      - nginx
+    volumes:
+      - whoami_logs:/root/logs
+
+volumes:
+  whoami_logs:
+  whoami_pg:
 

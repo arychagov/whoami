@@ -1,0 +1,10 @@
+/root/logs/whoami.access.log {
+  size 100M
+  rotate 3
+  missingok
+  notifempty
+  copytruncate
+  nocompress
+  dateext
+}
+
