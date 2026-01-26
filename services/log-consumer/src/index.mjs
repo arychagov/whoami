@@ -69,7 +69,8 @@ async function flush() {
     const params = [];
     let p = 1;
     for (const t of tuples) {
-      values.push(`($${p++}, $${p++}, $${p++})`);
+      // Explicit cast makes Postgres treat the param as timestamptz inside VALUES/CTE.
+      values.push(`($${p++}, $${p++}, $${p++}::timestamptz)`);
       // Pass Date object so pg sends proper timestamptz (not text)
       params.push(t.url, t.vhash, t.seenAt);
     }
@@ -108,7 +109,7 @@ async function flush() {
       let c = 1;
       const now = new Date();
       for (const [url, count] of inc.entries()) {
-        counterValues.push(`($${c++}, $${c++}, $${c++})`);
+        counterValues.push(`($${c++}, $${c++}, $${c++}::timestamptz)`);
         counterParams.push(url, count, now);
       }
 
