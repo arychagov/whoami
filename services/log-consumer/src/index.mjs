@@ -70,7 +70,8 @@ async function flush() {
     let p = 1;
     for (const t of tuples) {
       values.push(`($${p++}, $${p++}, $${p++})`);
-      params.push(t.url, t.vhash, t.seenAt.toISOString());
+      // Pass Date object so pg sends proper timestamptz (not text)
+      params.push(t.url, t.vhash, t.seenAt);
     }
 
     const incomingCte = `WITH incoming(url, visitor_hash, seen_at) AS (VALUES ${values.join(
@@ -105,10 +106,10 @@ async function flush() {
       const counterValues = [];
       const counterParams = [];
       let c = 1;
-      const nowIso = new Date().toISOString();
+      const now = new Date();
       for (const [url, count] of inc.entries()) {
         counterValues.push(`($${c++}, $${c++}, $${c++})`);
-        counterParams.push(url, count, nowIso);
+        counterParams.push(url, count, now);
       }
 
       await client.query(
