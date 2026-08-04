@@ -7,6 +7,9 @@ services:
       - NEXT_TELEMETRY_DISABLED=1
       - PORT=3000
       - HOSTNAME=0.0.0.0
+    volumes:
+      # Runtime public assets: drop files into ./public on the host (no rebuild).
+      - ./public:/app/public:ro
     expose:
       - "3000"
 

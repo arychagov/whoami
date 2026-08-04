@@ -13,3 +13,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Runtime-only public assets (added on the server, not committed)
+public/cv.pdf
+public/handsome_devil.jpeg
+
