@@ -175,7 +175,10 @@ def check_certificate(domains):
     certificate, key = LINEAGE / "fullchain.pem", LINEAGE / "privkey.pem"
     run(["openssl", "x509", "-in", certificate, "-noout", "-checkend", "86400"], capture=True)
     for domain in domains:
-        run(["openssl", "x509", "-in", certificate, "-noout", "-checkhost", domain], capture=True)
+        # x509 -checkhost exits 0 even for a mismatch; inspect the result too.
+        match = run(["openssl", "x509", "-in", certificate, "-noout", "-checkhost", domain], capture=True).stdout.strip()
+        if match != f"Hostname {domain} does match certificate":
+            raise RuntimeError(f"Issued certificate does not cover {domain}")
     public_cert = run(["openssl", "x509", "-in", certificate, "-pubkey", "-noout"], capture=True).stdout
     public_key = run(["openssl", "pkey", "-in", key, "-pubout"], capture=True).stdout
     if public_cert != public_key:

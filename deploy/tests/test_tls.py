@@ -145,7 +145,9 @@ class TlsTests(unittest.TestCase):
             tls.check_existing_names(["example.test", "www.example.test", "new.example.test"])
 
     def test_mismatched_private_key_is_rejected(self):
-        responses = [subprocess.CompletedProcess([], 0, output) for output in ["", "", "key-one", "key-two"]]
+        responses = [subprocess.CompletedProcess([], 0, output) for output in [
+            "", "Hostname example.test does match certificate\n", "key-one", "key-two",
+        ]]
         with patch.object(tls, "run", side_effect=responses), self.assertRaisesRegex(RuntimeError, "do not match"):
             tls.check_certificate(["example.test"])
 
@@ -209,6 +211,27 @@ class TlsTests(unittest.TestCase):
         rollback.assert_not_called()
         self.assertTrue((tls.CERT_DIR / "private.key.pem").is_symlink())
         self.assertTrue(tls.HOOK.exists())
+
+
+class OpenSslTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.temp.cleanup)
+        cls.lineage = Path(cls.temp.name)
+        subprocess.run([
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+            "-subj", "/CN=example.test", "-addext", "subjectAltName=DNS:example.test,DNS:www.example.test",
+            "-keyout", str(cls.lineage / "privkey.pem"), "-out", str(cls.lineage / "fullchain.pem"),
+        ], check=True, capture_output=True)
+
+    def test_real_certificate_matches_all_requested_names_and_key(self):
+        with patch.object(tls, "LINEAGE", self.lineage):
+            tls.check_certificate(["example.test", "www.example.test"])
+
+    def test_missing_name_is_rejected_despite_openssl_zero_exit_status(self):
+        with patch.object(tls, "LINEAGE", self.lineage), self.assertRaisesRegex(RuntimeError, "does not cover wrong.test"):
+            tls.check_certificate(["example.test", "wrong.test"])
 
 
 class HookTests(unittest.TestCase):
