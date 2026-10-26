@@ -47,7 +47,7 @@ class TlsTests(unittest.TestCase):
             target.write_text("new-" + name)
         (tls.CERT_DIR / "private.key.pem").chmod(0o600)
         self.args = argparse.Namespace(domain=["example.test"], email="admin@example.test",
-                                       project_name=None, agree_tos=True)
+                                       project_name=None, compose="auto", agree_tos=True)
 
     def restore(self, directory):
         # Production requires root-owned backups. Unit tests also run as an ordinary CI user.
@@ -175,6 +175,7 @@ class TlsTests(unittest.TestCase):
         for failure in ("http", "issuance"):
             with self.subTest(failure=failure), contextlib.ExitStack() as stack:
                 stack.enter_context(patch.object(tls.shutil, "which", return_value="/usr/bin/docker"))
+                stack.enter_context(patch.object(tls, "compose_command", return_value=["docker-compose"]))
                 stack.enter_context(patch.object(tls, "preflight", return_value="whoami"))
                 stack.enter_context(patch.object(tls, "check_existing_names"))
                 stack.enter_context(patch.object(tls, "certbot_installation", return_value=("/snap/bin/certbot", "timer")))
@@ -197,6 +198,7 @@ class TlsTests(unittest.TestCase):
                 raise RuntimeError("staging unreachable")
             return subprocess.CompletedProcess(args, 0, "")
         with patch.object(tls.shutil, "which", return_value="/usr/bin/docker"), \
+             patch.object(tls, "compose_command", return_value=["docker-compose"]), \
              patch.object(tls, "preflight", return_value="whoami"), \
              patch.object(tls, "check_existing_names"), \
              patch.object(tls, "certbot_installation", return_value=("/snap/bin/certbot", "timer")), \
@@ -211,6 +213,133 @@ class TlsTests(unittest.TestCase):
         rollback.assert_not_called()
         self.assertTrue((tls.CERT_DIR / "private.key.pem").is_symlink())
         self.assertTrue(tls.HOOK.exists())
+
+
+class ComposeTests(unittest.TestCase):
+    def test_standalone_is_detected_without_using_missing_plugin(self):
+        with patch.object(tls.shutil, "which", return_value="/usr/local/bin/docker-compose"), \
+             patch.object(tls, "run", return_value=subprocess.CompletedProcess([], 0, "1.29.2\n")) as command:
+            compose = tls.compose_command("/usr/bin/docker", "custom-project")
+        command.assert_called_once_with(
+            ["/usr/local/bin/docker-compose", "version", "--short"], capture=True)
+        self.assertEqual(compose[0], "/usr/local/bin/docker-compose")
+        self.assertEqual(compose[-2:], ["--project-name", "custom-project"])
+
+    def test_plugin_is_used_when_standalone_is_absent_or_explicitly_disabled(self):
+        for standalone, frontend in [(None, "auto"), ("/bin/docker-compose", "plugin")]:
+            with self.subTest(frontend=frontend), \
+                 patch.object(tls.shutil, "which", return_value=standalone), \
+                 patch.object(tls, "run", return_value=subprocess.CompletedProcess([], 0, "v2.39.4\n")) as command:
+                compose = tls.compose_command("/usr/bin/docker", frontend=frontend)
+                command.assert_called_once_with(
+                    ["/usr/bin/docker", "compose", "version", "--short"], capture=True)
+                self.assertEqual(compose[:2], ["/usr/bin/docker", "compose"])
+
+    def test_missing_compose_fails_before_config_or_container_changes(self):
+        with patch.object(tls.shutil, "which", return_value=None), \
+             patch.object(tls, "run", side_effect=subprocess.CalledProcessError(125, ["docker", "compose"])) as command, \
+             self.assertRaisesRegex(RuntimeError, "No working Compose"):
+            tls.compose_command("/usr/bin/docker")
+        self.assertEqual(command.call_count, 1)
+
+    def test_modern_compose_uses_json(self):
+        with patch.object(tls, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, "--format string"),
+            subprocess.CompletedProcess([], 0, '{"services": {"nginx": {}}}'),
+        ]) as command:
+            self.assertEqual(tls.compose_config(["docker", "compose"]), {"services": {"nginx": {}}})
+        self.assertEqual(command.call_args.args[0], ["docker", "compose", "config", "--format", "json"])
+
+    def test_legacy_compose_uses_yaml_without_name_or_format_flag(self):
+        with patch.object(tls, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, "--quiet --services --volumes"),
+            subprocess.CompletedProcess([], 0, 'services:\n  nginx:\n    volumes:\n      - /root/certs:/etc/nginx/certs:ro\n'),
+        ]) as command:
+            config = tls.compose_config(["docker-compose"])
+        self.assertNotIn("name", config)
+        self.assertEqual(command.call_args.args[0], ["docker-compose", "config"])
+        self.assertTrue(tls.compose_mounts(config)["/etc/nginx/certs"]["read_only"])
+
+    def test_bad_config_is_not_hidden_by_yaml_fallback(self):
+        with patch.object(tls, "run", side_effect=[
+            subprocess.CompletedProcess([], 0, "--format string"),
+            subprocess.CalledProcessError(1, ["config"], stderr="invalid mount"),
+        ]) as command, self.assertRaises(subprocess.CalledProcessError):
+            tls.compose_config(["docker", "compose"])
+        self.assertEqual(command.call_count, 2)
+
+    def test_missing_yaml_has_actionable_error_before_reading_config(self):
+        with patch.dict("sys.modules", {"yaml": None}), \
+             patch.object(tls, "run", return_value=subprocess.CompletedProcess([], 0, "--quiet")) as command, \
+             self.assertRaisesRegex(RuntimeError, "python3-yaml"):
+            tls.compose_config(["docker-compose"])
+        self.assertEqual(command.call_count, 1)
+
+    def test_short_and_long_mount_forms_keep_read_only_requirement(self):
+        config = {"services": {"nginx": {"volumes": [
+            "/root/certs:/etc/nginx/certs:ro",
+            "/var/www/letsencrypt:/var/www/letsencrypt:rw",
+            {"type": "bind", "source": "/etc/letsencrypt", "target": "/etc/letsencrypt", "read_only": True},
+            "whoami_logs:/root/logs:rw",
+        ]}}}
+        mounts = tls.compose_mounts(config)
+        self.assertTrue(mounts["/etc/nginx/certs"]["read_only"])
+        self.assertFalse(mounts["/var/www/letsencrypt"]["read_only"])
+        self.assertTrue(mounts["/etc/letsencrypt"]["read_only"])
+        self.assertEqual(mounts["/root/logs"]["type"], "volume")
+
+    def test_anonymous_volumes_are_rejected(self):
+        for volume in ["/data", {"type": "volume", "target": "/data"}]:
+            with self.subTest(volume=volume), self.assertRaises(RuntimeError):
+                tls.compose_mounts({"services": {"nginx": {"volumes": [volume]}}})
+
+    def test_preflight_uses_existing_project_and_validates_mounts_and_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in tls.CERT_FILES:
+                (root / name).write_text("existing")
+            with patch.object(tls, "PROJECT_DIR", root), patch.object(tls, "CERT_DIR", root):
+                config = {"services": {"nginx": {"volumes": [
+                    f"{root}/deploy/nginx:/etc/nginx/conf.d:ro",
+                    f"{root}:/etc/nginx/certs:ro",
+                    "/etc/letsencrypt:/etc/letsencrypt:ro",
+                    "/var/www/letsencrypt:/var/www/letsencrypt:ro",
+                    "whoami_logs:/root/logs:rw",
+                ]}}}
+                container = {
+                    "State": {"Running": True},
+                    "Config": {"Labels": {
+                        "com.docker.compose.project": "existing-custom-name",
+                        "com.docker.compose.service": "nginx",
+                        "com.docker.compose.oneoff": "False",
+                        "com.docker.compose.project.config_files": "docker-compose.yml",
+                        "com.docker.compose.project.working_dir": str(root),
+                    }},
+                    "Mounts": [{"Type": "bind", "Source": str(root), "Destination": "/etc/nginx/certs"}],
+                }
+                def check():
+                    with patch.object(tls, "compose_config", return_value=config), \
+                         patch.object(tls, "run", side_effect=[
+                             subprocess.CompletedProcess([], 0, "container-one\n"),
+                             subprocess.CompletedProcess([], 0, json.dumps([container])),
+                         ]):
+                        return tls.preflight("docker", ["docker-compose"])
+                self.assertEqual(check(), "existing-custom-name")
+                container["Config"]["Labels"]["com.docker.compose.project.config_files"] += ",override.yml"
+                with self.assertRaisesRegex(RuntimeError, "without overrides"):
+                    check()
+                container["Config"]["Labels"]["com.docker.compose.project.config_files"] = "docker-compose.yml"
+                container["Mounts"].append({"Type": "volume", "Destination": "/hidden-data", "Source": "/data"})
+                with self.assertRaisesRegex(RuntimeError, "undeclared volumes"):
+                    check()
+                container["Mounts"].pop()
+                container["State"]["Running"] = False
+                with self.assertRaisesRegex(RuntimeError, "one running nginx"):
+                    check()
+                container["State"]["Running"] = True
+                config["services"]["nginx"]["volumes"][0] = f"{root}/deploy/nginx:/etc/nginx/conf.d:rw"
+                with self.assertRaisesRegex(RuntimeError, "read-only bind"):
+                    check()
 
 
 class OpenSslTests(unittest.TestCase):

@@ -8,10 +8,26 @@ Certbot работает на хосте Ubuntu и получает сертиф
 ## Что выполнить на сервере
 
 Инструкция рассчитана на существующий работающий `whoami`: Ubuntu, Python 3,
-Docker Compose V2, `curl`, `openssl`, systemd, порты 80/443 и старые файлы
+Docker с `docker-compose` (V1/V2) или `docker compose`, `curl`, `openssl`,
+systemd, порты 80/443 и старые файлы
 `/root/certs/domain.cert.pem`, `/root/certs/private.key.pem`. Это миграция текущего
 развёртывания, не установка приложения на пустой сервер. Скрипт проверяет эти
 предпосылки до изменения сертификатов. Образы и запущенный `app` должны уже существовать.
+
+Скрипт сам выбирает рабочую команду: сначала `docker-compose`, затем `docker compose`.
+Устанавливать Compose plugin или создавать alias не нужно. При необходимости
+выбор можно закрепить флагом `--compose standalone` или `--compose plugin`.
+Старая Python-версия Compose V1 выводит YAML вместо JSON; для её проверки нужен
+пакет PyYAML в системном Python:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y python3-yaml
+```
+
+Эти две команды нужны только для V1, если пакет ещё не установлен. Если его нет,
+setup завершится с этой подсказкой до изменения контейнеров или сертификатов.
+В CI проверяются Compose 1.29.2, standalone 2.39.4 и современный plugin.
 
 1. В Porkbun проверь DNS для **каждого** имени сайта. `A` должен указывать на IP
    droplet; если есть `AAAA`, он должен вести на рабочий IPv6 этого же сервера.
@@ -53,7 +69,7 @@ Docker Compose V2, `curl`, `openssl`, systemd, порты 80/443 и старые
    ```
 
    Добавляй `www` только если DNS и HTTP этого имени настроены на тот же сервер.
-   Если проект раньше запускался с `docker compose -p NAME`, добавь
+   Если проект раньше запускался с `docker-compose -p NAME` или `docker compose -p NAME`, добавь
    `--project-name NAME`. Скрипт не поддерживает дополнительные Compose override-файлы
    и завершится с объяснением, если обнаружит их у работающего контейнера.
    Для wildcard (`*.example.com`) нужна отдельная настройка DNS-01.
@@ -70,6 +86,8 @@ App, PostgreSQL, log-consumer и logrotate скрипт не перезапус�
 ## Что делает скрипт
 
 - Проверяет имя Compose-проекта, текущий контейнер и ожидаемые read-only mounts.
+  Имя берётся у контейнера, найденного выбранной командой Compose; поддерживаются
+  прежние имена проектов, короткая запись volumes и старые labels Compose V1.
 - Использует установленный Certbot из Ubuntu apt/snap. Если его нет, устанавливает
   snapd и официальный snap Certbot. Существующие установки не удаляются.
 - Подключает `/etc/letsencrypt` целиком и `/var/www/letsencrypt` к Nginx. Каталог
@@ -77,6 +95,10 @@ App, PostgreSQL, log-consumer и logrotate скрипт не перезапус�
   атомарного сохранения редактором.
 - Проверяет Nginx временным контейнером, применяет mounts без сборки образов и
   проверяет HTTP-01 тестовым файлом для каждого переданного домена.
+  При пересоздании используется `--renew-anon-volumes`, чтобы обойти ошибку
+  `ContainerConfig` в Compose V1 с новым Docker Engine. У Nginx в этом проекте
+  данные хранятся в bind mounts и именованном томе логов; они сохраняются.
+  Если найдены анонимные или неописанные тома, скрипт останавливается заранее.
 - Получает сертификат с постоянным именем `whoami`; обычный повторный запуск
   сохраняет ещё не требующий продления сертификат. Прежние SAN-имена нельзя
   случайно исключить: скрипт попросит перечислить их снова.
@@ -149,13 +171,18 @@ sudo journalctl -u snap.certbot.renew.service -n 100 --no-pager
 ```bash
 python3 -m unittest discover -s deploy/tests -v
 bash deploy/tests/nginx-smoke.sh
+TEST_COMPOSE_FRONTEND=standalone python3 deploy/tests/compose-smoke.py
+TEST_COMPOSE_FRONTEND=plugin python3 deploy/tests/compose-smoke.py
 ```
 
 Первый набор использует временные каталоги и подмены команд. Второй требует Docker
 и OpenSSL: запускает изолированный Nginx с тестовыми самоподписанными сертификатами,
 проверяет HTTP-01, переход со старых файлов, отказ от reload при несовпадении ключа
 и сертификата, затем ротацию без пересоздания контейнера. К Let's Encrypt и к
-production-серверу эти тесты не обращаются. Оба запускаются в GitHub Actions.
+production-серверу эти тесты не обращаются. Дополнительный тест Compose проверяет
+реальное чтение конфигурации и пересоздание только Nginx с сохранением тома логов
+и работающего app. Выбирай установленный frontend; в GitHub Actions проверяются
+все три варианта Compose.
 
 Первый реальный выпуск и ACME dry-run проверяются только при запуске на droplet.
 
