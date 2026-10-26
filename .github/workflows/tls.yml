@@ -1,0 +1,35 @@
+name: TLS deployment checks
+
+on:
+  pull_request:
+    paths:
+      - "deploy/**"
+      - "docker-compose.yml"
+      - ".github/workflows/tls.yml"
+  push:
+    branches: [main]
+    paths:
+      - "deploy/**"
+      - "docker-compose.yml"
+      - ".github/workflows/tls.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate scripts and Compose
+        run: |
+          sh -n deploy/setup-tls.sh
+          bash -n deploy/tests/nginx-smoke.sh
+          python3 -m py_compile deploy/tls.py
+          docker compose config -q
+      - name: Test migration failures and renewal hook
+        run: python3 -m unittest discover -s deploy/tests -v
+      - name: Test real nginx and certificate rotation
+        run: bash deploy/tests/nginx-smoke.sh

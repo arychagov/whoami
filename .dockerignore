@@ -12,3 +12,7 @@ pnpm-debug.log*
 .env
 .env.*
 
+# Exclude locally downloaded TLS bundles from build contexts.
+deploy/certs
+
+
