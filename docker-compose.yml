@@ -22,10 +22,13 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx:/etc/nginx/conf.d:ro
       - ./public:/var/www/public:ro
       # Certs on the server:
       - /root/certs:/etc/nginx/certs:ro
+      # Certbot runs on the host. Mount the whole tree (live -> archive symlinks).
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/letsencrypt:/var/www/letsencrypt:ro
       # Access logs (requested path inside container)
       - whoami_logs:/root/logs
 
@@ -75,4 +78,5 @@ services:
 volumes:
   whoami_logs:
   whoami_pg:
+
 

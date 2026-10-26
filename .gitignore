@@ -17,3 +17,11 @@ pnpm-debug.log*
 public/cv.pdf
 public/handsome_devil.jpeg
 
+# TLS material stays on the server, never in Git.
+/deploy/certs/*
+!/deploy/certs/README.md
+
+__pycache__/
+*.pyc
+
+

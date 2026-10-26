@@ -1,14 +1,166 @@
-Put your TLS cert files here (not committed to git).
+# HTTPS: автоматическое продление без пересборки Docker
 
-This project is currently configured for Porkbun-provided filenames:
+Certbot работает на хосте Ubuntu и получает сертификат напрямую у Let's Encrypt
+через HTTP-01. Porkbun остаётся регистратором/DNS-провайдером; его API-ключи не нужны.
+После успешного продления hook проверяет конфигурацию и делает graceful reload Nginx.
+Образы приложения и Nginx при этом не собираются, контейнеры не пересоздаются.
 
-- `domain.cert.pem`
-- `private.key.pem`
-- (`public.key.pem` is not used by nginx, but you can keep it here if you want)
+## Что выполнить на сервере
 
-Deployment assumes certs are stored on the server in:
+Инструкция рассчитана на существующий работающий `whoami`: Ubuntu, Python 3,
+Docker Compose V2, `curl`, `openssl`, systemd, порты 80/443 и старые файлы
+`/root/certs/domain.cert.pem`, `/root/certs/private.key.pem`. Это миграция текущего
+развёртывания, не установка приложения на пустой сервер. Скрипт проверяет эти
+предпосылки до изменения сертификатов. Образы и запущенный `app` должны уже существовать.
 
-- `/root/certs`
+1. В Porkbun проверь DNS для **каждого** имени сайта. `A` должен указывать на IP
+   droplet; если есть `AAAA`, он должен вести на рабочий IPv6 этого же сервера.
+   Входящий TCP 80 должен быть открыт в firewall сервера и DigitalOcean постоянно,
+   включая время следующих продлений. Нужен и исходящий HTTPS для ACME.
+   Этот вариант рассчитан на прямое подключение к droplet без внешнего TLS-прокси.
 
-and mounted into nginx as `/etc/nginx/certs`.
+2. Получи изменения **в том же каталоге, из которого запущен текущий Compose**.
+   После слияния PR в `main`:
+
+   ```bash
+   cd /absolute/path/to/whoami
+   git switch main
+   git pull --ff-only
+   ```
+
+   Если на сервере есть локальные изменения конфигов, сначала сохрани и сопоставь
+   их с PR: не используй `git reset --hard`. Для проверки до слияния можно вместо
+   `main` переключиться на ветку PR. Не запускай `docker compose down`.
+
+3. Запусти **одну команду**, заменив домен и почту:
+
+   ```bash
+   sudo ./deploy/setup-tls.sh \
+     --domain example.com \
+     --email you@example.com \
+     --agree-tos
+   ```
+
+   `--agree-tos` означает согласие с [условиями Let's Encrypt](https://letsencrypt.org/repository/).
+   При необходимости укажи дополнительные имена повторением `--domain`:
+
+   ```bash
+   sudo ./deploy/setup-tls.sh \
+     --domain example.com \
+     --domain www.example.com \
+     --email you@example.com \
+     --agree-tos
+   ```
+
+   Добавляй `www` только если DNS и HTTP этого имени настроены на тот же сервер.
+   Если проект раньше запускался с `docker compose -p NAME`, добавь
+   `--project-name NAME`. Скрипт не поддерживает дополнительные Compose override-файлы
+   и завершится с объяснением, если обнаружит их у работающего контейнера.
+   Для wildcard (`*.example.com`) нужна отдельная настройка DNS-01.
+
+4. Дождись сообщения `Done. Automatic renewal is enabled ...` и открой сайт по HTTPS.
+   Скрипт сам проверяет сертификат, который отдаёт локальный Nginx, с проверкой
+   доверия, имени домена и совпадения SHA-256 fingerprint с новым файлом.
+
+При первом подключении новых mounts будет короткое пересоздание **только Nginx**.
+App, PostgreSQL, log-consumer и logrotate скрипт не перезапускает.
+Следующие продления проходят через reload. Не меняй одновременно конфиги и
+сертификаты другими командами во время миграции.
+
+## Что делает скрипт
+
+- Проверяет имя Compose-проекта, текущий контейнер и ожидаемые read-only mounts.
+- Использует установленный Certbot из Ubuntu apt/snap. Если его нет, устанавливает
+  snapd и официальный snap Certbot. Существующие установки не удаляются.
+- Подключает `/etc/letsencrypt` целиком и `/var/www/letsencrypt` к Nginx. Каталог
+  `deploy/nginx` тоже монтируется целиком, чтобы изменения файлов были видны после
+  атомарного сохранения редактором.
+- Проверяет Nginx временным контейнером, применяет mounts без сборки образов и
+  проверяет HTTP-01 тестовым файлом для каждого переданного домена.
+- Получает сертификат с постоянным именем `whoami`; обычный повторный запуск
+  сохраняет ещё не требующий продления сертификат. Прежние SAN-имена нельзя
+  случайно исключить: скрипт попросит перечислить их снова.
+- Создаёт приватную резервную копию прежних файлов/ссылок и hook в
+  `/var/lib/whoami-tls/backups/`, затем заменяет два файла в `/root/certs` ссылками:
+
+  ```text
+  domain.cert.pem -> /etc/letsencrypt/live/whoami/fullchain.pem
+  private.key.pem -> /etc/letsencrypt/live/whoami/privkey.pem
+  ```
+
+  Пути `ssl_certificate` в Nginx остаются прежними. Эти ссылки доступны и на хосте,
+  и внутри контейнера, потому что весь `/etc/letsencrypt` подключён read-only.
+- Устанавливает `/etc/letsencrypt/renewal-hooks/deploy/20-whoami-nginx`. Hook реагирует
+  только на lineage `whoami`, находит **текущий** контейнер по Compose labels,
+  выполняет `nginx -t`, затем `nginx -s reload`. Доступ к Docker socket внутри
+  контейнера не требуется. Пересоздание контейнера не ломает hook.
+- Включает штатный systemd timer Certbot и выполняет staging dry-run вместе с hook.
+  Проверяет hook ещё и отдельно: Certbot не всегда возвращает ненулевой код при
+  ошибке deploy-hook. Новый cron или отдельный контейнер Certbot не создаётся.
+
+Сертификаты, ключи и резервные копии остаются на сервере. Не клади их в Git или
+в `public/`. `.gitignore` и `.dockerignore` исключают локальные файлы `deploy/certs`.
+
+## Если возникла ошибка
+
+- **HTTP-01 / DNS / timeout до выпуска:** проверь DNS всех имён и порт 80. Старые
+  сертификаты остаются подключёнными. Исправь причину и повтори ту же команду.
+- **Ошибка переключения / reload / проверки нового HTTPS:** скрипт пытается
+  восстановить прежние файлы и hook, затем повторно загружает Nginx. Путь резервной
+  копии печатается перед переключением. Принудительное завершение процесса или
+  перезагрузка сервера могут прервать восстановление.
+- **Ошибка dry-run уже после успешного переключения:** работающий новый сертификат
+  сохраняется; скрипт завершается с ошибкой. Исправь причину и повтори запуск.
+  До успешной проверки нельзя считать автоматическое продление настроенным.
+
+Для явного отката используй **точный путь**, напечатанный скриптом:
+
+```bash
+sudo ./deploy/setup-tls.sh --rollback /var/lib/whoami-tls/backups/ACTUAL_BACKUP_DIRECTORY
+```
+
+Откат восстанавливает файлы/ссылки сертификатов и прежний hook, а также делает reload.
+Он не удаляет выданный сертификат, не отключает общий timer Certbot и не отменяет
+HTTP-01/mount-настройки из Git. Старый сертификат должен оставаться действительным.
+Резервная копия существующих ссылок восстанавливает ссылки, не прежнюю версию
+lineage Certbot. После отката на ручные сертификаты их нужно снова обслуживать вручную.
+
+## Проверка и обслуживание
+
+Для snap-установки (при установке через apt используй `certbot` вместо `/snap/bin/certbot`):
+
+```bash
+sudo /snap/bin/certbot certificates
+sudo /snap/bin/certbot renew --cert-name whoami --dry-run --run-deploy-hooks
+systemctl list-timers --all '*certbot*'
+sudo journalctl -u snap.certbot.renew.service -n 100 --no-pager
+```
+
+У apt-пакета service называется `certbot.service`. Подробности ACME также находятся
+в `/var/log/letsencrypt/letsencrypt.log`. Периодическая проверка срока сертификата
+снаружи полезна для обнаружения ошибок DNS, таймера или reload.
+
+Чтобы добавить имя, настрой для него DNS и повтори setup со **всеми** прежними
+`--domain` плюс новым. При смене имени Compose-проекта повторно запусти setup с
+новым `--project-name`; hook выбирает проект по этому имени.
+
+## Проверки разработки
+
+```bash
+python3 -m unittest discover -s deploy/tests -v
+bash deploy/tests/nginx-smoke.sh
+```
+
+Первый набор использует временные каталоги и подмены команд. Второй требует Docker
+и OpenSSL: запускает изолированный Nginx с тестовыми самоподписанными сертификатами,
+проверяет HTTP-01, переход со старых файлов, отказ от reload при несовпадении ключа
+и сертификата, затем ротацию без пересоздания контейнера. К Let's Encrypt и к
+production-серверу эти тесты не обращаются. Оба запускаются в GitHub Actions.
+
+Первый реальный выпуск и ACME dry-run проверяются только при запуске на droplet.
+
+Справка: [Certbot webroot и renew](https://eff-certbot.readthedocs.io/en/stable/using.html),
+[установка Certbot](https://certbot.eff.org/instructions?ws=other&os=snap),
+[Nginx reload](https://nginx.org/en/docs/control.html).
+
 
