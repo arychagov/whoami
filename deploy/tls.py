@@ -71,12 +71,65 @@ def validate_domains(domains):
     return result
 
 
-def compose_command(docker, project_name=None):
-    command = [docker, "compose", "--project-directory", str(PROJECT_DIR),
-               "-f", str(PROJECT_DIR / "docker-compose.yml")]
+def compose_command(docker, project_name=None, frontend="auto"):
+    standalone = shutil.which("docker-compose")
+    candidates = []
+    # Keep using an existing standalone installation when both forms are present.
+    if frontend in ("auto", "standalone") and standalone:
+        candidates.append([standalone])
+    if frontend in ("auto", "plugin"):
+        candidates.append([docker, "compose"])
+    for candidate in candidates:
+        try:
+            version = run([*candidate, "version", "--short"], capture=True).stdout.strip()
+        except (OSError, subprocess.CalledProcessError):
+            continue
+        print(f"Using Compose: {shlex.join(candidate)} ({version})", flush=True)
+        command = [*candidate, "--project-directory", str(PROJECT_DIR),
+                   "-f", str(PROJECT_DIR / "docker-compose.yml")]
+        break
+    else:
+        raise RuntimeError("No working Compose command found. Install docker-compose or the docker compose plugin "
+                           "and make it available in root's PATH")
     if project_name:
         command.extend(["--project-name", project_name])
     return command
+
+
+def compose_config(compose):
+    help_text = run([*compose, "config", "--help"], capture=True).stdout
+    if "--format" in help_text:
+        return json.loads(run([*compose, "config", "--format", "json"], capture=True).stdout)
+    # Python Compose V1 only emits YAML. Do not treat a config error as a reason
+    # to retry with another frontend or silently skip mount validation.
+    try:
+        import yaml
+    except ImportError as error:
+        raise RuntimeError("Legacy docker-compose needs PyYAML for config validation. On Ubuntu run: "
+                           "sudo apt-get update && sudo apt-get install -y python3-yaml; then rerun setup") from error
+    output = run([*compose, "config"], capture=True).stdout
+    try:
+        return yaml.safe_load(output)
+    except yaml.YAMLError as error:
+        raise RuntimeError("Could not parse docker-compose config output") from error
+
+
+def compose_mounts(config):
+    mounts = {}
+    for volume in config["services"]["nginx"]["volumes"]:
+        if isinstance(volume, str):
+            # V1 serializes short-form Linux mounts as source:target[:mode].
+            parts = volume.split(":")
+            if len(parts) not in (2, 3):
+                raise RuntimeError("nginx must use explicit bind mounts or named volumes")
+            source, target = parts[:2]
+            volume = {"type": "bind" if source.startswith("/") else "volume",
+                      "source": source, "target": target,
+                      "read_only": len(parts) == 3 and "ro" in parts[2].split(",")}
+        if volume.get("type") == "volume" and not volume.get("source"):
+            raise RuntimeError("nginx must not use anonymous volumes during this migration")
+        mounts[volume["target"]] = volume
+    return mounts
 
 
 def running_nginx(docker, project):
@@ -97,14 +150,8 @@ def reload_nginx(docker, project):
 
 
 def preflight(docker, compose):
-    config = json.loads(run([*compose, "config", "--format", "json"], capture=True).stdout)
-    project = config["name"]
-    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
-        raise RuntimeError("Unexpected Compose project name")
-    mounts = {
-        volume["target"]: volume
-        for volume in config["services"]["nginx"]["volumes"]
-    }
+    config = compose_config(compose)
+    mounts = compose_mounts(config)
     expected = {
         "/etc/nginx/conf.d": PROJECT_DIR / "deploy/nginx",
         "/etc/nginx/certs": CERT_DIR,
@@ -116,16 +163,32 @@ def preflight(docker, compose):
         if (volume.get("type") != "bind" or volume.get("source") != str(source)
                 or not volume.get("read_only")):
             raise RuntimeError(f"Expected read-only bind mount {source}:{target}; check docker-compose.yml")
-    container = running_nginx(docker, project)
-    actual = json.loads(run([
-        docker, "inspect", "--format", "{{json .Mounts}}", container,
-    ], capture=True).stdout)
+    # Let the selected Compose implementation resolve -p, .env and directory
+    # defaults. V1 has no top-level name in its config output.
+    ids = run([*compose, "ps", "-q", "nginx"], capture=True).stdout.split()
+    containers = json.loads(run([docker, "inspect", *ids], capture=True).stdout) if ids else []
+    containers = [c for c in containers if c["State"]["Running"]
+                  and c["Config"]["Labels"].get("com.docker.compose.service") == "nginx"
+                  and c["Config"]["Labels"].get("com.docker.compose.oneoff", "false").lower() != "true"]
+    if len(containers) != 1:
+        raise RuntimeError(f"Expected exactly one running nginx in this Compose project; found {len(containers)}")
+    container = containers[0]
+    labels = container["Config"]["Labels"]
+    project = labels.get("com.docker.compose.project", "")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project):
+        raise RuntimeError("Unexpected Compose project name")
+    actual = container["Mounts"]
+    # --renew-anon-volumes avoids V1's ContainerConfig crash on modern Docker.
+    # It is safe here only because nginx has no anonymous persistent data.
+    named_targets = {target for target, mount in mounts.items() if mount.get("type") == "volume"}
+    if any(m.get("Type") == "volume" and m["Destination"] not in named_targets for m in actual):
+        raise RuntimeError("Running nginx has undeclared volumes; adapt the migration to preserve them first")
     if not any(m["Destination"] == "/etc/nginx/certs" and m["Source"] == str(CERT_DIR) for m in actual):
         raise RuntimeError("Running nginx uses a different certificate directory; adapt the migration first")
-    labels = json.loads(run([
-        docker, "inspect", "--format", "{{json .Config.Labels}}", container,
-    ], capture=True).stdout)
-    if labels.get("com.docker.compose.project.config_files") != str(PROJECT_DIR / "docker-compose.yml"):
+    files = labels.get("com.docker.compose.project.config_files", "").split(",")
+    working_dir = Path(labels.get("com.docker.compose.project.working_dir", str(PROJECT_DIR)))
+    files = [(working_dir / name).resolve() for name in files if name]
+    if files != [(PROJECT_DIR / "docker-compose.yml").resolve()]:
         raise RuntimeError("Run in the existing checkout; this script expects docker-compose.yml without overrides")
     for filename in CERT_FILES:
         if not (CERT_DIR / filename).is_file():
@@ -324,7 +387,7 @@ def setup(args):
     for executable in ("docker", "curl", "openssl", "systemctl"):
         if not shutil.which(executable):
             raise RuntimeError(f"Required host command not found: {executable}")
-    compose = compose_command(docker, args.project_name)
+    compose = compose_command(docker, args.project_name, args.compose)
     project = preflight(docker, compose)
     check_existing_names(args.domain)
     certbot, timer = certbot_installation()
@@ -333,7 +396,7 @@ def setup(args):
     (WEBROOT / ".well-known/acme-challenge").mkdir(mode=0o755, parents=True, exist_ok=True)
     print("Checking and applying nginx mounts (the first migration briefly recreates nginx).", flush=True)
     run([*compose, "run", "--rm", "--no-deps", "-T", "nginx", "nginx", "-t"])
-    run([*compose, "up", "-d", "--no-deps", "--no-build", "nginx"])
+    run([*compose, "up", "-d", "--no-deps", "--no-build", "--renew-anon-volumes", "nginx"])
     reload_nginx(docker, project)
     check_http(args.domain)
     issue = [
@@ -369,6 +432,8 @@ def main(argv=None):
     parser.add_argument("--email", help="Let's Encrypt account email")
     parser.add_argument("--agree-tos", action="store_true", help="Accept Let's Encrypt Subscriber Agreement")
     parser.add_argument("--project-name", help="Existing Compose project name, if originally started with -p")
+    parser.add_argument("--compose", choices=("auto", "standalone", "plugin"), default="auto",
+                        help="Compose frontend; auto prefers docker-compose when installed")
     parser.add_argument("--rollback", type=Path, help="Restore certificate files/hook from a printed backup directory")
     args = parser.parse_args(argv)
     if not args.rollback:

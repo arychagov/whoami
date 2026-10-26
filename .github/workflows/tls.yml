@@ -29,7 +29,64 @@ jobs:
           bash -n deploy/tests/nginx-smoke.sh
           python3 -m py_compile deploy/tls.py
           docker compose config -q
+      - name: Install legacy config parser for tests
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
       - name: Test migration failures and renewal hook
         run: python3 -m unittest discover -s deploy/tests -v
       - name: Test real nginx and certificate rotation
         run: bash deploy/tests/nginx-smoke.sh
+
+  compose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: plugin
+            frontend: plugin
+          - name: standalone-v1
+            frontend: standalone
+            release: 1.29.2
+            asset: docker-compose-Linux-x86_64
+          - name: standalone-v2
+            frontend: standalone
+            release: v2.39.4
+            asset: docker-compose-linux-x86_64
+    name: Compose ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install YAML parser
+        run: sudo apt-get update && sudo apt-get install -y python3-yaml
+      - name: Install standalone Compose for compatibility test
+        if: matrix.frontend == 'standalone'
+        env:
+          COMPOSE_RELEASE: ${{ matrix.release }}
+          COMPOSE_ASSET: ${{ matrix.asset }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/compose-bin"
+          cd "$RUNNER_TEMP/compose-bin"
+          base_url="https://github.com/docker/compose/releases/download/$COMPOSE_RELEASE"
+          curl --fail --location --retry 3 "$base_url/$COMPOSE_ASSET" -o "$COMPOSE_ASSET"
+          curl --fail --location --retry 3 "$base_url/$COMPOSE_ASSET.sha256" -o checksum
+          read -r expected_hash _ < checksum
+          printf '%s  %s\n' "$expected_hash" "$COMPOSE_ASSET" | sha256sum --check
+          mv "$COMPOSE_ASSET" docker-compose
+          chmod +x docker-compose
+          echo "$RUNNER_TEMP/compose-bin" >> "$GITHUB_PATH"
+      - name: Validate actual repository configuration
+        env:
+          TEST_COMPOSE_FRONTEND: ${{ matrix.frontend }}
+        run: |
+          python3 - <<'PY'
+          import os, shutil, sys
+          sys.path.insert(0, "deploy")
+          import tls
+          compose = tls.compose_command(shutil.which("docker"), frontend=os.environ["TEST_COMPOSE_FRONTEND"])
+          tls.run([*compose, "config", "-q"])
+          assert "/etc/letsencrypt" in tls.compose_mounts(tls.compose_config(compose))
+          PY
+      - name: Test real Compose migration and preserved logs
+        env:
+          TEST_COMPOSE_FRONTEND: ${{ matrix.frontend }}
+        run: python3 deploy/tests/compose-smoke.py
